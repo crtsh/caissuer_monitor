@@ -23,12 +23,15 @@ import (
 	"crypto/x509"
 	"database/sql"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/lib/pq"
+	"github.com/miekg/dns"
 	"go.mozilla.org/pkcs7"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -50,6 +53,7 @@ type config struct {
 type Work struct {
 	c *config
 	db *sql.DB
+	dns_config *dns.ClientConfig
 	timeout time.Duration
 	transport http.Transport
 	http_client http.Client
@@ -86,6 +90,8 @@ func (w *Work) Init(c *config) {
 	w.http_client = http.Client { CheckRedirect: checkRedirectURL, Timeout: w.timeout, Transport: &w.transport }
 
 	var err error
+	w.dns_config, err = dns.ClientConfigFromFile("/etc/resolv.conf")
+	checkErr(err)
 
 	w.import_cert_statement, err = w.db.Prepare(`
 SELECT import_cert($1)
@@ -133,6 +139,43 @@ func (wi *WorkItem) logResult(action string, outcome string) {
 	log.Printf("%v,%v,\"%s\",\"%s\",%d,\"%s\",\"%v\"\n", time.Now().UTC(), time.Now().UTC().Sub(wi.start_time), action, wi.ca_issuer_url, wi.ca_id, outcome, wi.ca_certificate_ids)
 }
 
+func externalIP() (string, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "", err
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue // interface down
+		}
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue // loopback interface
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			return "", err
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+			ip = ip.To4()
+			if ip == nil {
+				continue // not an ipv4 address
+			}
+			return ip.String(), nil
+		}
+	}
+	return "", errors.New("are you connected to the network?")
+}
+
 // WorkItem.Perform()
 // Do the work for one item.
 func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
@@ -150,7 +193,16 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 	req.Header.Set("User-Agent", "crt.sh")
 	resp, err := w.http_client.Do(req)
 	if err != nil {
-		wi.logResult("ERROR", fmt.Sprintf("%v", err))
+		err_string := err.Error()
+		if _, ok := err.(net.Error); ok {
+			for i := 0; i < len(w.dns_config.Servers); i++ {
+				err_string = strings.ReplaceAll(err_string, w.dns_config.Servers[i], "[redacted]")
+			}
+			if external_ip, eerr := externalIP(); eerr == nil {
+				err_string = strings.ReplaceAll(err_string, external_ip, "[redacted]")
+			}
+		}
+		wi.logResult("ERROR", err_string)
 		return
 	}
 	defer resp.Body.Close()
