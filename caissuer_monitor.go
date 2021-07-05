@@ -54,7 +54,6 @@ type Work struct {
 	c *config
 	db *sql.DB
 	dns_config *dns.ClientConfig
-	timeout time.Duration
 	transport http.Transport
 	http_client http.Client
 	import_cert_statement *sql.Stmt
@@ -87,7 +86,7 @@ func (c *config) PrintCustomFlags() string {
 func (w *Work) Init(c *config) {
 	w.c = c
 	w.transport = http.Transport { TLSClientConfig: &tls.Config { InsecureSkipVerify: true } }
-	w.http_client = http.Client { CheckRedirect: checkRedirectURL, Timeout: w.timeout, Transport: &w.transport }
+	w.http_client = http.Client { CheckRedirect: checkRedirectURL, Timeout: w.c.HTTPTimeout.Duration, Transport: &w.transport }
 
 	var err error
 	w.dns_config, err = dns.ClientConfigFromFile("/etc/resolv.conf")
